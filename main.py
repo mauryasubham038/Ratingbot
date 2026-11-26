@@ -1,17 +1,17 @@
 # pip install python-telegram-bot==21.6
-import sqlite3, random, time
+import os, sqlite3, random, time
 from telegram import Update, InlineKeyboardButton as B, InlineKeyboardMarkup as M
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                           ContextTypes)
 
-TOKEN = "YOUR_BOT_TOKEN"
-ADMIN_ID = 123456789               # owner ki Telegram numeric ID
+TOKEN = os.environ["BOT_TOKEN"]            # env variable se token
+ADMIN_ID = int(os.environ["ADMIN_ID"])     # owner ki Telegram numeric ID
 PREMIUM_CONTACT = "@hellllooo4"
 VERY_GOOD_AT, PREMIUM_AT = 100, 200
 PENDING_DAYS = 30                  # itne din tak pending yaad rakhega
 SUPPORT_URL = "https://t.me/hellllooo4"
 
-db = sqlite3.connect("bot.db", check_same_thread=False)
+db = sqlite3.connect(os.environ.get("DB_PATH", "bot.db"), check_same_thread=False)
 db.executescript("""
 CREATE TABLE IF NOT EXISTS users(
   tg_id INTEGER PRIMARY KEY, uid TEXT UNIQUE, gender TEXT,
