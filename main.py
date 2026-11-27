@@ -1,15 +1,23 @@
 # pip install python-telegram-bot==21.6
 import os, sqlite3, random, time
+from urllib.parse import quote
 from telegram import Update, InlineKeyboardButton as B, InlineKeyboardMarkup as M
+from telegram.error import BadRequest
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                           ContextTypes)
 
 TOKEN = os.environ["BOT_TOKEN"]            # env variable se token
 ADMIN_ID = int(os.environ["ADMIN_ID"])     # owner ki Telegram numeric ID
-PREMIUM_CONTACT = "@hellllooo4"
+
+PREMIUM_CONTACT = "@ZenithSsupport"        # Premium "Prove" yahin khulega
+SUPPORT_URL = "https://t.me/hellllooo4"    # Support button
+UPDATE_CHANNEL_URL = os.environ.get("UPDATE_CHANNEL_URL", "")  # channel link yaha daalo
 VERY_GOOD_AT, PREMIUM_AT = 100, 200
-PENDING_DAYS = 30                  # itne din tak pending yaad rakhega
-SUPPORT_URL = "https://t.me/hellllooo4"
+PENDING_DAYS = 30                          # itne din tak pending yaad rakhega
+
+HEARTS = "♥️♥️♥️♥️♥️"
+HI_TEXT = f"Main HeartMatch se aaya hu, kya hum baat kar sakte hain? {HEARTS}"
+PREMIUM_TEXT = "I want to join premium membership"
 
 db = sqlite3.connect(os.environ.get("DB_PATH", "bot.db"), check_same_thread=False)
 db.executescript("""
@@ -20,7 +28,10 @@ CREATE TABLE IF NOT EXISTS links(id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT)
 CREATE TABLE IF NOT EXISTS pending(seeker INTEGER PRIMARY KEY, earner TEXT);
 """)
 for tbl, col in (("users", "premium INTEGER DEFAULT 0"),
-                 ("pending", "ts INTEGER")):
+                 ("users", "username TEXT"),
+                 ("pending", "ts INTEGER"),
+                 ("pending", "g TEXT"),
+                 ("pending", "t TEXT")):
     try:
         db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col}")
     except sqlite3.OperationalError:
@@ -28,17 +39,32 @@ for tbl, col in (("users", "premium INTEGER DEFAULT 0"),
 db.execute("UPDATE pending SET ts=? WHERE ts IS NULL", (int(time.time()),))
 db.commit()
 
-def tier(points, premium):
+# gender: "boy" = BF, "girl" = GF
+def tier(points, premium, gender):
+    if gender == "boy":                      # BF me sirf good / very good
+        return "very" if (premium or points >= VERY_GOOD_AT) else "good"
     if premium or points >= PREMIUM_AT: return "premium"
     return "very" if points >= VERY_GOOD_AT else "good"
 
-NAMES = {"good": "Good Girl", "very": "Very Good Girl", "premium": "Premium Girl"}
+NAMES = {"boy": {"good": "Good BF", "very": "Very Good BF"},
+         "girl": {"good": "Good GF", "very": "Very Good GF", "premium": "Premium GF"}}
+
+def support_row():
+    row = [B("🆘 Support", url=SUPPORT_URL)]
+    if UPDATE_CHANNEL_URL:
+        row.append(B("📢 Updates", url=UPDATE_CHANNEL_URL))
+    return row
 
 def rate_kb(uid):
-    return M([[B(str(i), callback_data=f"rate:{uid}:{i}") for i in range(6)],
-              SUPPORT_ROW])
+    return M([[B("Report" if i == 0 else str(i), callback_data=f"rate:{uid}:{i}")
+               for i in range(6)],
+              support_row()])
 
-SUPPORT_ROW = [B("🆘 Support @hellllooo4", url=SUPPORT_URL)]
+def menu_kb():
+    return M([[B("🎫 Join Membership", callback_data="earn")],
+              [B("💞 Need Partner", callback_data="seek")],
+              [B("🎥 Video Link", callback_data="video")],
+              support_row()])
 
 def pending_of(tg):
     # 30 din se purani pending entries history se hata do
@@ -47,18 +73,62 @@ def pending_of(tg):
     r = db.execute("SELECT earner FROM pending WHERE seeker=?", (tg,)).fetchone()
     return r[0] if r else None
 
+PENDING_MSG = "⚠️ Pehle pichli ID ko rating do. Rating ke baad hi aage badh sakte ho."
+
+async def edit(q, text, **kw):
+    try:
+        await q.edit_message_text(text, **kw)
+    except BadRequest as e:               # same text dobara bhejne par error ignore
+        if "not modified" not in str(e).lower():
+            raise
+
 # ---------- user flow ----------
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    kb = M([[B("💰 Earn Me", callback_data="earn")],
-            [B("🙋 Service Want", callback_data="seek")],
-            [B("🎥 Video", callback_data="video")],
-            SUPPORT_ROW])
     p = pending_of(u.effective_user.id)
     if p:
-        return await u.effective_message.reply_text(
-            "⚠️ Pehle pichli ID ko rating do, tab tak bot aur kuchh nahi karega.",
-            reply_markup=rate_kb(p))
-    await u.effective_message.reply_text("Welcome! Choose an option:", reply_markup=kb)
+        return await u.effective_message.reply_text(PENDING_MSG, reply_markup=rate_kb(p))
+    await u.effective_message.reply_text("💘 HeartMatch me aapka swagat hai!\nNeeche se chuno:",
+                                         reply_markup=menu_kb())
+
+async def join_check(q, g):
+    """Username check -> membership join."""
+    me, un = q.from_user.id, q.from_user.username
+    if not un:
+        return await edit(
+            q, "⚠️ Aapka username nahi hai.\n\n"
+               "Telegram Settings me jao, username set karo, "
+               "phir 'Check again' dabao.",
+            reply_markup=M([[B("🔄 Check again", callback_data=f"chk:{g}")]]))
+    db.execute("INSERT INTO users(tg_id,uid,gender,username) VALUES(?,?,?,?) "
+               "ON CONFLICT(tg_id) DO UPDATE SET username=excluded.username, "
+               "gender=excluded.gender", (me, str(me), g, un))
+    db.commit()
+    await edit(q, "✅ Aap member ban gaye!\n\n"
+                  "Ab /start dabao aur 'Need Partner' dabake ID lo.")
+
+async def give_match(q, c, me, g, t):
+    rows = [r for r in db.execute(
+        "SELECT uid,tg_id,points,premium,username FROM users "
+        "WHERE gender=? AND tg_id!=?", (g, me)) if tier(r[2], r[3], g) == t]
+    random.shuffle(rows)
+    for uid, tg, _, _, un in rows[:25]:
+        try:                               # latest username lo
+            un = (await c.bot.get_chat(tg)).username
+        except Exception:
+            pass                           # fetch fail -> saved username
+        if not un:
+            continue
+        db.execute("UPDATE users SET username=? WHERE tg_id=?", (un, tg))
+        db.execute("INSERT OR REPLACE INTO pending(seeker,earner,ts,g,t) "
+                   "VALUES(?,?,?,?,?)", (me, uid, int(time.time()), g, t)); db.commit()
+        url = f"https://t.me/{un}?text={quote(HI_TEXT)}"
+        return await edit(
+            q, f"💘 {NAMES[g][t]} ki ID mil gayi!\n\n"
+               "'Chat now' dabao. Message pehle se likha hoga, bas Send karo.\n"
+               "Baat ke baad rating dena zaruri hai.",
+            reply_markup=M([[B("💬 Chat now", url=url)],
+                            [B("⭐ Rate now", callback_data=f"rm:{uid}")]]))
+    await edit(q, "Abhi is category me koi nahi hai. Thodi der baad try karo.")
 
 async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query; await q.answer()
@@ -68,98 +138,85 @@ async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if a not in ("rm", "rate"):
         p = pending_of(me)
         if p:
-            return await q.message.reply_text(
-                "⚠️ Pehle pichli ID ko rating do, tab tak bot aur kuchh nahi karega.",
-                reply_markup=rate_kb(p))
+            return await q.message.reply_text(PENDING_MSG, reply_markup=rate_kb(p))
+
+    if a == "home":
+        return await edit(q, "💘 HeartMatch me aapka swagat hai!\nNeeche se chuno:",
+                          reply_markup=menu_kb())
 
     if a == "video":
         links = db.execute("SELECT url FROM links").fetchall()
         if not links:
-            return await q.message.reply_text("Abhi koi video link available nahi hai.")
-        return await q.message.reply_text(f"🎥 Video link:\n{random.choice(links)[0]}")
+            return await q.message.reply_text("Abhi koi video link nahi hai.")
+        return await q.message.reply_text(
+            "🎥 Video links:\n\n" + "\n".join(x[0] for x in links))
 
-    # ----- EARN -----
+    # ----- JOIN MEMBERSHIP -----
     if a == "earn":
-        row = db.execute("SELECT uid FROM users WHERE tg_id=?", (me,)).fetchone()
-        if row:
-            return await q.edit_message_text(f"Aap already add ho.\nYour ID: {row[0]}")
-        await q.edit_message_text("Select:", reply_markup=M([[
-            B("👦 I am Boy", callback_data="eg:boy"),
-            B("👧 I am Girl", callback_data="eg:girl")]]))
+        row = db.execute("SELECT username FROM users WHERE tg_id=?", (me,)).fetchone()
+        if row and row[0]:
+            return await edit(q, "✅ Aap pehle se member ho.")
+        await edit(
+            q, "🎫 Join Membership\n\n"
+               "Aapko baat karne ke liye dusre members ki ID milegi.\n"
+               "Jitna achha baat karoge, utni achhi rating milegi.\n"
+               "Rating ke hisab se aapko achhi category aur achhe users milenge.\n\nChuno:",
+            reply_markup=M([[B("👦 I am Boy", callback_data="eg:boy"),
+                             B("👧 I am Girl", callback_data="eg:girl")]]))
 
     elif a == "eg":
-        await q.edit_message_text("Choose:", reply_markup=M([
-            [B("✅ Without verification", callback_data=f"wv:{d[1]}")],
+        if d[1] == "boy":                  # boy: seedha username check
+            return await join_check(q, "boy")
+        await edit(q, "Kaun sa membership chahiye?", reply_markup=M([
+            [B("🙂 Normal", callback_data="chk:girl")],
             [B("👑 Premium", callback_data="prem")]]))
 
+    elif a == "chk":
+        await join_check(q, d[1])
+
     elif a == "prem":
-        await q.edit_message_text(
-            f"👑 Premium me add hone ke liye {PREMIUM_CONTACT} se baat karo.")
+        url = (f"https://t.me/{PREMIUM_CONTACT.lstrip('@')}"
+               f"?text={quote(f'{PREMIUM_TEXT}. My ID: {me}')}")
+        await edit(
+            q, "👑 Premium Membership\n\n"
+               "Admin check karega ki aap girl ho. Check hone ke baad aap "
+               "Premium GF category me aa jaoge.\n\n"
+               "'Prove' dabao. Support chat khulega aur message pehle se likha hoga.",
+            reply_markup=M([[B("⬅️ Back", callback_data="eg:girl"),
+                             B("✅ Prove", url=url)]]))
 
-    elif a == "wv":
-        await q.edit_message_text(
-            "Service dene ke liye aap agree karte ho? (18+ only)",
-            reply_markup=M([[B("✅ You agree", callback_data=f"agree:{d[1]}")]]))
-
-    elif a == "agree":
-        if not db.execute("SELECT 1 FROM users WHERE tg_id=?", (me,)).fetchone():
-            db.execute("INSERT INTO users(tg_id,uid,gender) VALUES(?,?,?)",
-                       (me, str(me), d[1]))
-            db.commit()
-        await q.edit_message_text(f"✅ Add ho gaye!\nYour ID: {me}")
-
-    # ----- SERVICE WANT -----
+    # ----- NEED PARTNER -----
     elif a == "seek":
-        p = pending_of(me)
-        if p:
-            return await q.edit_message_text(
-                "⚠️ Pehle pichli ID ko rating do, phir nayi ID milegi.",
-                reply_markup=rate_kb(p))
-        await q.edit_message_text("Select:", reply_markup=M([[
-            B("👦 Boy", callback_data="sg:boy"), B("👧 Girl", callback_data="sg:girl")]]))
+        await edit(q, "Aapko kya chahiye?", reply_markup=M([[
+            B("💙 BF", callback_data="sg:boy"), B("💖 GF", callback_data="sg:girl")]]))
 
     elif a == "sg":
         g = d[1]
-        await q.edit_message_text("Choose category:", reply_markup=M([
-            [B("⭐ Good Girl", callback_data=f"t:{g}:good")],
-            [B("🌟 Very Good Girl", callback_data=f"t:{g}:very")],
-            [B("👑 Premium Girl", callback_data=f"t:{g}:premium")]]))
+        rows = [[B(f"{e} {NAMES[g][t]}", callback_data=f"t:{g}:{t}")]
+                for e, t in (("⭐", "good"), ("🌟", "very"), ("👑", "premium"))
+                if t in NAMES[g]]
+        await edit(q, "Category chuno:", reply_markup=M(rows))
 
     elif a == "t":
-        g, t = d[1], d[2]
-        p = pending_of(me)
-        if p:
-            return await q.edit_message_text(
-                "⚠️ Pehle pichli ID ko rating do, phir nayi ID milegi.",
-                reply_markup=rate_kb(p))
-        rows = [r for r in db.execute(
-            "SELECT uid,tg_id,points,premium FROM users "
-            "WHERE gender=? AND tg_id!=?", (g, me))
-            if tier(r[2], r[3]) == t]
-        if not rows:
-            return await q.edit_message_text("Abhi is category me koi available nahi hai.")
-        uid, tg = random.choice(rows)[:2]
-        db.execute("INSERT OR REPLACE INTO pending(seeker,earner,ts) VALUES(?,?,?)",
-                   (me, uid, int(time.time()))); db.commit()
-        link = f"tg://user?id={tg}"   # sirf Telegram ID, username save nahi hota
-        await q.edit_message_text(
-            f'💬 <a href="{link}">👉 Yaha click karke baat karo</a>\n\n'
-            "Baat ke baad rating dena zaruri hai.",
-            parse_mode="HTML",
-            reply_markup=M([[B("⭐ Rate now", callback_data=f"rm:{uid}")]]))
+        await give_match(q, c, me, d[1], d[2])
 
     elif a == "rm":
-        await q.edit_message_text(
-            "Rating do (0 = kharab, 5 = bahut accha):", reply_markup=rate_kb(d[1]))
+        await edit(q, "Rating do:\nReport = bura, 5 = bahut achha",
+                   reply_markup=rate_kb(d[1]))
 
     elif a == "rate":
         uid, r = d[1], int(d[2])
         if pending_of(me) != uid:
-            return await q.edit_message_text("Ye rating pehle hi ho chuki hai.")
+            return await edit(q, "Is ID ko aap rating de chuke ho.")
+        g, t = db.execute("SELECT g,t FROM pending WHERE seeker=?", (me,)).fetchone()
         pts = -1 if r == 0 else r
         db.execute("UPDATE users SET points=MAX(points+?,0) WHERE uid=?", (pts, uid))
         db.execute("DELETE FROM pending WHERE seeker=?", (me,)); db.commit()
-        await q.edit_message_text("✅ Thanks! Rating add ho gayi.\nNayi ID ke liye Service Want dabao.")
+        row = []
+        if g and t:
+            row.append(B("🔄 Other ID", callback_data=f"t:{g}:{t}"))
+        row.append(B("🏠 Start", callback_data="home"))
+        await edit(q, "✅ Shukriya! Rating mil gayi.", reply_markup=M([row]))
 
 # ---------- owner commands ----------
 def admin(f):
